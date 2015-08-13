@@ -1,0 +1,86 @@
+#!/usr/bin/env python
+
+import os
+import hashlib
+
+from jinja2 import Template
+from flask import Flask, render_template, request
+
+ROOT_FOLDER = os.getenv('HOME') + '/.chunkt'
+CONFIG_FILE = ROOT_FOLDER + '/config.json'
+BANDITS_FILE = ROOT_FOLDER + '/bandits.json'
+
+INDEX_TEMPLATE = '''
+<html>
+    <head><title>chunkt</title><head>
+    <body>
+        <div id="container">
+            <h1>chunkt</h1>
+            <ul id="chunktrees">
+            {% for chunktree in chunktrees %}
+                <li><a href="/{{ chunktree.hash }}/pull">{{ chunktree.path }}</a></li>
+            {% endfor %}
+            </ul>
+        </div>
+    </body>
+</html>'''
+
+CHUNK_TEMPLATE = '''
+<html>
+    <head><title>chunkt</title><head>
+    <body>
+        <div id="container">
+          
+        </div>
+    </body>
+</html>'''
+
+app = Flask(__name__)
+
+def bootstrap():
+    # initialize root folder, config and bandits file
+    pass
+
+def find_chunktrees():
+    chunktrees = []
+    for root, dirs, files in os.walk(ROOT_FOLDER):
+        for f in files:
+            if f.endswith(".md"):
+                chunktree_path = os.path.join(root.split('.chunkt/')[1], f)
+                chunktree_hash = hashlib.md5(chunktree_path).hexdigest()
+                chunktrees.append({'path': chunktree_path, 'hash': chunktree_hash})
+    
+    return sorted(chunktrees, key=lambda x: x['path'])
+
+
+@app.route('/')
+def index():
+    return Template(INDEX_TEMPLATE).render(chunktrees=find_chunktrees())
+
+@app.route('/<chunktree>/pull')
+def pull(chunktree):
+    # find the chunktree path md5 in bandits.json keys
+    # if not found, find the md5 of existing chunktrees
+    # checkthe contents md5 is in bandits.json values
+    # and then if it is there, fix the new path md5 in bandits.json
+
+    # load the bandit info
+    # convert the markdown to the chunktree
+    # clean every chunk hash in the bandit info that is not in the chunktree anymore
+    # instantiate the bandit
+    # pull the best arm
+    # check if it is not in the last n
+    # if it is, try again
+    # else, keep in memory and send the right chunk
+    return 'selects and renders a chunk: %s' % chunktree
+
+@app.route('/<chunktree>/pull/<pull>/reward', methods=['POST'])
+def reward(chunktree, pull):
+    # check if chunktree exists and if pull id is in memory
+    # if not, return
+    # if it is, update the bandit info
+    return 'notify reward and and pull again: %s %s %s' % (chunktree, pull, request.get_json())
+
+if __name__ == '__main__':
+    bootstrap()
+    app.run(debug=True)
