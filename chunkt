@@ -207,7 +207,7 @@ class Chunk:
 
     def _extract_list_item_content(self, el):
         content = ''
-        for c in el.children:
+        for c in el.select('> *'):
             if c.name == 'p':
                 content += c.renderContents()
             elif c.name != 'ul': 
@@ -266,7 +266,6 @@ class Document:
         with codecs.open(self.absolute_path(), encoding='utf-8') as f:
             content = f.read()
             html = markdown.markdown(content)
-            print html
             h1 = BeautifulSoup(html, 'lxml').select_one('h1')
             self._content_hash = (hashlib.md5(content).hexdigest())
             self._registry = {} 
