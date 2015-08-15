@@ -3,15 +3,21 @@
 
 import os
 import re
+import sys
 import json
 import copy
+import codecs
 import hashlib
-import mistune
+import markdown
 import scipy.stats as st
 
 from jinja2 import Template
 from bs4 import BeautifulSoup
-from flask import Flask, render_template, request
+from collections import deque
+from flask import Flask, render_template, request, redirect, url_for
+
+reload(sys)  
+sys.setdefaultencoding('utf8')
 
 ################################################################################
 # CONSTANTS
@@ -19,6 +25,7 @@ from flask import Flask, render_template, request
 
 ROOT_DIR = os.getenv('HOME') + '/.chunkt'
 CHUNKTS_FILE = ROOT_DIR + '/chunktfile.json'
+LAST_N = 3
 
 ################################################################################
 # TEMPLATES
@@ -32,19 +39,23 @@ INDEX_TEMPLATE = '''
         <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/css/bootstrap.min.css">
         <script src="//code.jquery.com/jquery-1.11.3.min.js"></script>
         <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/js/bootstrap.min.js"></script>
+        <style>
+            body { background: url(http://subtlepatterns.com/patterns/cubes.png); }
+            .container-fluid { margin: 10px !important; }
+            .list-group { margin-bottom: 10px; !important; }
+        </style>
     <head>
-    <body>
+    <body style="background: url(http://subtlepatterns.com/patterns/cubes.png);">
         <div class="container-fluid">
             <div class="row">
-                <div class="panel panel-default">
-
+                <div class="panel panel-primary">
                     <div class="panel-heading">
-                        <h1 class="panel-title">chunkt</h1>
+                        <h1 class="panel-title"><strong>chunkt</strong></h1>
                     </div>
                     <div class="panel-body">
-                        <div id="chunkts" class="list-group">
-                        {% for chunkt in chunkts %}
-                            <a href="/{{ chunkt.hash }}/pull" class="list-group-item">{{ chunkt.path }}</a>
+                        <div id="documents" class="list-group">
+                        {% for document in documents %}
+                            <a href="/{{ document.hash }}/pull" class="list-group-item">{{ document.path }}</a>
                         {% endfor %}
                         </div>
                     </div>
@@ -62,18 +73,34 @@ CHUNK_TEMPLATE = '''
         <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/css/bootstrap.min.css">
         <script src="//code.jquery.com/jquery-1.11.3.min.js"></script>
         <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/js/bootstrap.min.js"></script>
+        <script type="text/javascript" src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
         <script>
+            MathJax.Hub.Config({ tex2jax: { inlineMath: [['$','$']] }} );
             $(function() {
-                $("#show").on('click', function() { $(".action-btn-group, .back").toggleClass('hide') }).focus();
+                $("#show").on('click', function() { 
+                    $(".action-btn-group, .back").toggleClass('hide');
+                    $("#reward1").focus()
+                }).focus();
+                $(".reward").on('click', function() {
+                    var rewardValue = $(this).attr('data-value');
+                    $("#reward-form [name=value]").attr('value', rewardValue);
+                    $("#reward-form").submit();
+                });
             });
-        </script
+        </script>
+        <style>
+            body { background: url(http://subtlepatterns.com/patterns/cubes.png); }
+            .container-fluid { margin: 10px !important; }
+        </style>
     <head>
-    <body>
+    <body style="background: url(http://subtlepatterns.com/patterns/cubes.png);">
         <div class="container-fluid">
             <div class="row">
-                <div class="panel panel-default">
+                <div class="panel panel-primary">
                     <div class="panel-heading">
-                        <h1 class="panel-title">{{ ' / '.join(chunkt.path.split('/')) }}</h1>
+                        <h1 class="panel-title"><a href="/" tabindex="-1">
+                            <strong>chunkt</strong></a> <em>/ {{ ' / '.join(document.path.split('/')) }}</em>
+                        </h1>
                     </div>
                     <div class="panel-body">
                         <ul class="front list-group">
@@ -93,12 +120,12 @@ CHUNK_TEMPLATE = '''
                         </div>
                         <div class="action-btn-group btn-group btn-group-justified hide" role="group">
                             <div class="btn-group" role="group">
-                                <button id="reward1" type="button" class="btn btn-default">
+                                <button id="reward1" type="button" data-value="1" class="reward btn btn-default">
                                     <span class="glyphicon glyphicon-remove" aria-hidden="true"></span>
                                 </button>
                             </div>
                             <div class="btn-group" role="group">
-                                <button id="reward0" type="button" class="btn btn-default">
+                                <button id="reward0" type="button" data-value="0" class="reward btn btn-default">
                                     <span class="glyphicon glyphicon-ok" aria-hidden="true"></span>
                                 </button>
                             </div>
@@ -107,6 +134,11 @@ CHUNK_TEMPLATE = '''
                 </div>
             </div>
         </div>
+        <form id="reward-form" class="hide" method="post" action="/{{ document.hash }}/reward">
+            <input type="hidden" name="document_hash" value="{{ document.hash }}" />
+            <input type="hidden" name="chunk_hash" value="{{ chunk.hash() }}" />
+            <input type="hidden" name="value" value="0" />
+        </form>
     </body>
 </html>'''
 
@@ -125,7 +157,8 @@ class Chunk:
     def __init__(self, el, registry, func=None, depth=0):
         self.depth = depth
         self.children = []
-        matched = re.match('[hH]([0-9])', el.name) 
+
+        matched = el.name and re.match('[hH]([0-9])', el.name) 
         
         if matched:
             self._handle_titles(el, registry, func, matched)
@@ -140,7 +173,7 @@ class Chunk:
         self.content = el.renderContents()
 
         for sibling in el.next_siblings:
-            if not sibling.name:
+            if not sibling or not sibling.name:
                 continue
                 
             s_matched = re.match('[hH]([0-9])', sibling.name)
@@ -155,7 +188,8 @@ class Chunk:
 
         ul = el.select_one('~ ul')
         for li in ul.select('> li'):
-            self.children.append(Chunk(li, registry, func=func, depth=self.depth+1))
+            if  li.name:
+                self.children.append(Chunk(li, registry, func=func, depth=self.depth+1))
 
     def _handle_list_items(self, el, registry, func):
         p = el.find('p')
@@ -168,7 +202,8 @@ class Chunk:
         elif ul:
             self.content = self._extract_list_item_content(el)
             for li in ul.select('> li'):
-                self.children.append(Chunk(li, registry, func=func, depth=self.depth+1))
+                if li.name:
+                    self.children.append(Chunk(li, registry, func=func, depth=self.depth+1))
 
     def _extract_list_item_content(self, el):
         content = ''
@@ -190,14 +225,15 @@ class Chunk:
         return back
 
     def hash(self):
-        return hashlib.md5(self.front() + ''.join(self.back())).hexdigest()
+        s = self.front() + ''.join(self.back())
+        return hashlib.md5(s).hexdigest()
 
 
 ################################################################################
 # CHUNKT
 ################################################################################
 
-class Chunkt:
+class Document:
     
     def __init__(self, path, hash, root_dir=ROOT_DIR):
         self.hash = hash
@@ -227,9 +263,10 @@ class Chunkt:
         return self._registry
 
     def load(self, func=None):
-        with open(self.absolute_path()) as markdown:
-            content = markdown.read()
-            html = mistune.markdown(content)
+        with codecs.open(self.absolute_path(), encoding='utf-8') as f:
+            content = f.read()
+            html = markdown.markdown(content)
+            print html
             h1 = BeautifulSoup(html, 'lxml').select_one('h1')
             self._content_hash = (hashlib.md5(content).hexdigest())
             self._registry = {} 
@@ -242,21 +279,45 @@ class Chunkt:
 
 class Bandit:
 
-    def __init__(self, chunkt, info):
-        self.chunkt = chunkt
-        self.info = info
+    def __init__(self, document, data):
+        self.document = document
+        self.data = data
 
     def pull(self):
         best_arm = None
         highest_sample = -float('inf')
         
-        for arm_hash, arm_info in self.info['arms'].iteritems():
-            sample = st.beta(1 + arm_info['hits'], 1 + arm_info['misses']).rvs()
+        eligible_arms = set(self.data['chunks'].keys()) - set(self.data['last_n'])
+        if not eligible_arms:
+            eligible_arms = set(self.data['chunks'].keys())
+
+        for arm_hash in eligible_arms:
+            arm_data = self.data['chunks'][arm_hash]
+            sample = st.beta(1 + arm_data['misses'], 1 + arm_data['hits']).rvs()
             if sample > highest_sample:
                 best_arm = arm_hash
                 highest_sample = sample
 
-        return self.chunkt.registry()[best_arm]
+        return self.document.registry()[best_arm]
+
+    def reward(self, value, chunk_hash):
+        arm_info = self.data['chunks'][chunk_hash]
+        if not arm_info:
+            return False
+
+        if value == 0:
+            self.data['chunks'][chunk_hash]['hits'] += 1
+        elif value == 1:
+            self.data['chunks'][chunk_hash]['misses'] += 1
+        else:
+            return False
+
+        last_n = deque(self.data['last_n'], LAST_N)
+        last_n.append(chunk_hash)
+        self.data['last_n'] = list(last_n)
+
+        return True
+
 
 ################################################################################
 # BANDIT ENGINE
@@ -267,52 +328,54 @@ class BanditEngine:
     def __init__(self, data):
         self.data = data
 
-    def fix_chunkt_hashes(self, chunkt):
-        hash_exists = chunkt.hash in self.data
+    def fix_document_hashes(self, document):
+        hash_exists = document.hash in self.data
         if hash_exists: 
-            self.data[chunkt.hash]['content_hash'] = chunkt.content_hash()
+            self.data[document.hash]['content_hash'] = document.content_hash()
         else:
             data_copy = copy.deepcopy(self.data)
-            for chunkt_hash, info in data_copy.iteritems():
-                if info['content_hash'] == chunkt.content_hash():
-                    info['path'] = chunkt.path
-                    self.data[chunkt.hash] = info
-                    del self.data[chunkt_hash]
+            for document_hash, data in data_copy.iteritems():
+                if data['content_hash'] == document.content_hash():
+                    data['path'] = document.path
+                    self.data[document.hash] = data
+                    del self.data[document_hash]
                     break
 
-    def fix_chunks_hashes(self, chunkt):
-        active_chunks_hashes = set(chunkt.registry().keys())
-        current_bandit_hashes = set(self.data[chunkt.hash]['arms'].keys())
+    def fix_chunks_hashes(self, document):
+        active_chunks_hashes = set(document.registry().keys())
+        current_bandit_hashes = set(self.data[document.hash]['chunks'].keys())
         obsolete_hashes = current_bandit_hashes - active_chunks_hashes
         new_hashes = active_chunks_hashes - current_bandit_hashes
         for h in obsolete_hashes:
-            del self.data[chunkt.hash]['arms'][h]
+            del self.data[document.hash]['chunks'][h]
         for h in new_hashes:
-            self.data[chunkt.hash]['arms'][h] = {'misses': 0, 'hits': 0}
+            self.data[document.hash]['chunks'][h] = {'misses': 0, 'hits': 0}
 
     def _post_create_chunk(self, chunk, registry):
         if len(chunk.children) > 0:
             registry[chunk.hash()] = chunk
 
 
-    def initialize_data(self, chunkt):
-        data = self.data.get(chunkt.hash)
+    def initialize_data(self, document):
+        data = self.data.get(document.hash)
         if not data:
-            self.data[chunkt.hash] = {
-                'content_hash': chunkt.content_hash(),
-                'path': chunkt.path,
-                'arms': {}
+            self.data[document.hash] = {
+                'content_hash': document.content_hash(),
+                'path': document.path,
+                'chunks': {},
+                'last_n': []
             }
 
-    def update(self, chunkt):
-        chunkt.load(self._post_create_chunk)
-        self.fix_chunkt_hashes(chunkt)
-        self.initialize_data(chunkt)
-        self.fix_chunks_hashes(chunkt)
+    def update(self, document):
+        document.load(self._post_create_chunk)
+        self.fix_document_hashes(document)
+        self.initialize_data(document)
+        self.fix_chunks_hashes(document)
 
-    def load(self, chunkt):
-        info = self.data[chunkt.hash]
-        return Bandit(chunkt, info)
+    def load(self, document):
+        data = self.data[document.hash]
+        return Bandit(document, data)
+
 
 
 ################################################################################
@@ -320,38 +383,36 @@ class BanditEngine:
 ################################################################################
 
 def load_engine_data():
-    with open(CHUNKTS_FILE, 'r') as bandits_file:
+    with codecs.open(CHUNKTS_FILE, 'r', encoding='utf-8') as bandits_file:
         return json.loads(bandits_file.read())
 
 def save_engine_data(bandit_engine):
-    with open(CHUNKTS_FILE, 'w') as bandits_file:
+    with codecs.open(CHUNKTS_FILE, 'w', encoding='utf-8') as bandits_file:
         bandits_file.write(json.dumps(bandit_engine.data))
 
-def load_bandit(chunkt):
-    bandit_engine = BanditEngine(load_engine_data())
-    bandit_engine.update(chunkt)
-    save_engine_data(bandit_engine)
-    return bandit_engine.load(chunkt)
+def load_bandit(bandit_engine, document):
+    bandit_engine.update(document)
+    return bandit_engine.load(document)
 
 ################################################################################
 # CHUNKT REPOSITORY
 ################################################################################
 
-def all_chunkts():
-    chunkts = []
+def all_documents():
+    documents = []
     for root, dirs, files in os.walk(ROOT_DIR):
         for f in files:
             if f.endswith(".md"):
-                chunkt_path = os.path.join(root.split('.chunkt/')[1], f)
-                chunkt_hash = hashlib.md5(chunkt_path).hexdigest()
-                chunkts.append(Chunkt(chunkt_path, chunkt_hash))
+                document_path = os.path.join(root.split('.chunkt/')[1], f)
+                document_hash = hashlib.md5(document_path).hexdigest()
+                documents.append(Document(document_path, document_hash))
     
-    return sorted(chunkts, key=lambda x: x.path)
+    return sorted(documents, key=lambda x: x.path)
 
-def find_chunkt(chunkt_hash):
-    for chunkt in all_chunkts():
-        if chunkt.hash == chunkt_hash:
-            return chunkt
+def find_document(document_hash):
+    for document in all_documents():
+        if document.hash == document_hash:
+            return document
 
 
 ################################################################################
@@ -360,31 +421,38 @@ def find_chunkt(chunkt_hash):
 
 @app.route('/')
 def index():
-    return Template(INDEX_TEMPLATE).render(chunkts=all_chunkts())
+    return Template(INDEX_TEMPLATE).render(documents=all_documents())
 
-@app.route('/<chunkt_hash>/pull')
-def pull(chunkt_hash):
-    chunkt = find_chunkt(chunkt_hash)
-    if not chunkt:
-        return 'Chunkt not found', 404
+@app.route('/<document_hash>/pull')
+def pull(document_hash):
+    document = find_document(document_hash)
+    if not document:
+        return 'Document not found', 404
 
-    bandit = load_bandit(chunkt)
+    bandit_engine = BanditEngine(load_engine_data())
+    bandit = load_bandit(bandit_engine, document)
     chunk = bandit.pull()
-    return Template(CHUNK_TEMPLATE).render(chunkt=chunkt, chunk=chunk)
+    save_engine_data(bandit_engine)
+    return Template(CHUNK_TEMPLATE).render(document=document, chunk=chunk)
 
-@app.route('/<chunkt_hash>/reward', methods=['POST'])
-def reward(chunkt_hash):
-    # check if chunkt exists and if pull id is in memory
-    # if not, return
-    # if it is, update the bandit info
-    return 'notify reward and and pull again: %s %s %s' % (chunkt, pull, request.get_json())
+@app.route('/<document_hash>/reward', methods=['POST'])
+def reward(document_hash):
+    document = find_document(document_hash)
+    if not document:
+        return 'Document not found', 404
+
+    bandit_engine = BanditEngine(load_engine_data())
+    bandit = load_bandit(bandit_engine, document)
+    bandit.reward(int(request.form['value']), request.form['chunk_hash'])
+    save_engine_data(bandit_engine)
+    return redirect(url_for('pull', document_hash=document_hash))
 
 @app.before_request
 def bootstrap():
     if not os.path.exists(ROOT_DIR):
         os.makedirs(ROOT_DIR)
     if not os.path.exists(CHUNKTS_FILE):
-        with open(CHUNKTS_FILE, 'w') as bandits_file:
+        with codecs.open(CHUNKTS_FILE, 'w', encoding='utf-8') as bandits_file:
             bandits_file.write('{}\n')
 
 
