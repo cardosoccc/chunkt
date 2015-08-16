@@ -55,7 +55,7 @@ INDEX_TEMPLATE = '''
                     <div class="panel-body">
                         <div id="documents" class="list-group">
                         {% for document in documents %}
-                            <a href="/{{ document.hash }}/pull" class="list-group-item">{{ document.path }}</a>
+                            <a href="/{{ document.hash }}/pull" class="list-group-item">{{ ' / '.join(document.path.split('/')) }}</a>
                         {% endfor %}
                         </div>
                     </div>
@@ -91,6 +91,68 @@ CHUNK_TEMPLATE = '''
         <style>
             body { background: url(http://subtlepatterns.com/patterns/cubes.png); }
             .container-fluid { margin: 10px !important; }
+            .hll { background-color: #ffffcc }
+            .c { color: #408080; font-style: italic } /* Comment */
+            .err { border: 1px solid #FF0000 } /* Error */
+            .k { color: #008000; font-weight: bold } /* Keyword */
+            .o { color: #666666 } /* Operator */
+            .cm { color: #408080; font-style: italic } /* Comment.Multiline */
+            .cp { color: #BC7A00 } /* Comment.Preproc */
+            .c1 { color: #408080; font-style: italic } /* Comment.Single */
+            .cs { color: #408080; font-style: italic } /* Comment.Special */
+            .gd { color: #A00000 } /* Generic.Deleted */
+            .ge { font-style: italic } /* Generic.Emph */
+            .gr { color: #FF0000 } /* Generic.Error */
+            .gh { color: #000080; font-weight: bold } /* Generic.Heading */
+            .gi { color: #00A000 } /* Generic.Inserted */
+            .go { color: #888888 } /* Generic.Output */
+            .gp { color: #000080; font-weight: bold } /* Generic.Prompt */
+            .gs { font-weight: bold } /* Generic.Strong */
+            .gu { color: #800080; font-weight: bold } /* Generic.Subheading */
+            .gt { color: #0044DD } /* Generic.Traceback */
+            .kc { color: #008000; font-weight: bold } /* Keyword.Constant */
+            .kd { color: #008000; font-weight: bold } /* Keyword.Declaration */
+            .kn { color: #008000; font-weight: bold } /* Keyword.Namespace */
+            .kp { color: #008000 } /* Keyword.Pseudo */
+            .kr { color: #008000; font-weight: bold } /* Keyword.Reserved */
+            .kt { color: #B00040 } /* Keyword.Type */
+            .m { color: #666666 } /* Literal.Number */
+            .s { color: #BA2121 } /* Literal.String */
+            .na { color: #7D9029 } /* Name.Attribute */
+            .nb { color: #008000 } /* Name.Builtin */
+            .nc { color: #0000FF; font-weight: bold } /* Name.Class */
+            .no { color: #880000 } /* Name.Constant */
+            .nd { color: #AA22FF } /* Name.Decorator */
+            .ni { color: #999999; font-weight: bold } /* Name.Entity */
+            .ne { color: #D2413A; font-weight: bold } /* Name.Exception */
+            .nf { color: #0000FF } /* Name.Function */
+            .nl { color: #A0A000 } /* Name.Label */
+            .nn { color: #0000FF; font-weight: bold } /* Name.Namespace */
+            .nt { color: #008000; font-weight: bold } /* Name.Tag */
+            .nv { color: #19177C } /* Name.Variable */
+            .ow { color: #AA22FF; font-weight: bold } /* Operator.Word */
+            .w { color: #bbbbbb } /* Text.Whitespace */
+            .mb { color: #666666 } /* Literal.Number.Bin */
+            .mf { color: #666666 } /* Literal.Number.Float */
+            .mh { color: #666666 } /* Literal.Number.Hex */
+            .mi { color: #666666 } /* Literal.Number.Integer */
+            .mo { color: #666666 } /* Literal.Number.Oct */
+            .sb { color: #BA2121 } /* Literal.String.Backtick */
+            .sc { color: #BA2121 } /* Literal.String.Char */
+            .sd { color: #BA2121; font-style: italic } /* Literal.String.Doc */
+            .s2 { color: #BA2121 } /* Literal.String.Double */
+            .se { color: #BB6622; font-weight: bold } /* Literal.String.Escape */
+            .sh { color: #BA2121 } /* Literal.String.Heredoc */
+            .si { color: #BB6688; font-weight: bold } /* Literal.String.Interpol */
+            .sx { color: #008000 } /* Literal.String.Other */
+            .sr { color: #BB6688 } /* Literal.String.Regex */
+            .s1 { color: #BA2121 } /* Literal.String.Single */
+            .ss { color: #19177C } /* Literal.String.Symbol */
+            .bp { color: #008000 } /* Name.Builtin.Pseudo */
+            .vc { color: #19177C } /* Name.Variable.Class */
+            .vg { color: #19177C } /* Name.Variable.Global */
+            .vi { color: #19177C } /* Name.Variable.Instance */
+            .il { color: #666666 } /* Literal.Number.Integer.Long */
         </style>
     <head>
     <body style="background: url(http://subtlepatterns.com/patterns/cubes.png);">
@@ -158,12 +220,18 @@ class Chunk:
         self.depth = depth
         self.children = []
 
-        matched = el.name and re.match('[hH]([0-9])', el.name) 
+        matched = el and el.name and re.match('[hH]([0-9])', el.name) 
         
         if matched:
             self._handle_titles(el, registry, func, matched)
         elif el.name == 'li':
             self._handle_list_items(el, registry, func)
+        elif el.name == 'pre':
+            print el.parent
+            if el.find_parent('.codehilite'):
+                self.content = str(el.parent)
+            else:
+                self.content = str(el)
 
         if func:
             func(self, registry)
@@ -188,13 +256,15 @@ class Chunk:
 
         ul = el.select_one('~ ul')
         for li in ul.select('> li'):
-            if  li.name:
+            if li.name:
                 self.children.append(Chunk(li, registry, func=func, depth=self.depth+1))
 
     def _handle_list_items(self, el, registry, func):
         p = el.find('p')
         ul = el.select_one('ul')
-        
+        pre = el.select_one('> pre')
+        wrapped_pre = el.select_one('.codehilite > pre')
+
         if p and not ul:
             self.content = p.renderContents()
         elif not p and not ul:
@@ -204,6 +274,14 @@ class Chunk:
             for li in ul.select('> li'):
                 if li.name:
                     self.children.append(Chunk(li, registry, func=func, depth=self.depth+1))
+
+        if len(self.children) > 0:
+            return
+
+        if pre:
+            self.children.append(Chunk(pre, registry, func=func, depth=self.depth+1))
+        elif wrapped_pre:
+            self.children.append(Chunk(wrapped_pre, registry, func=func, depth=self.depth+1))
 
     def _extract_list_item_content(self, el):
         content = ''
@@ -265,7 +343,7 @@ class Document:
     def load(self, func=None):
         with codecs.open(self.absolute_path(), encoding='utf-8') as f:
             content = f.read()
-            html = markdown.markdown(content)
+            html = markdown.markdown(content, extensions=['markdown.extensions.codehilite'])
             h1 = BeautifulSoup(html, 'lxml').select_one('h1')
             self._content_hash = (hashlib.md5(content).hexdigest())
             self._registry = {} 
