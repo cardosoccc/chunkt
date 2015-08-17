@@ -404,6 +404,7 @@ class Bandit:
             self.data['chunks'][chunk_hash]['last_hits'] = list(last_hits)
         elif value == 1:
             self.data['chunks'][chunk_hash]['misses'] += 1
+            self.data['chunks'][chunk_hash]['hits'] = 0
             self.data['chunks'][chunk_hash]['last_hits'] = []
         else:
             return False
