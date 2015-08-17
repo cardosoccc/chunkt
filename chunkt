@@ -25,11 +25,11 @@ sys.setdefaultencoding('utf8')
 ################################################################################
 
 ROOT_DIR = os.getenv('HOME') + '/.chunkt'
-CHUNKTS_FILE = ROOT_DIR + '/chunktfile.json'
-LAST_N = 3
-HITS_TO_COMPLETE = 2
-HALF_LIFE = 30
+CHUNKTFILE = ROOT_DIR + '/chunktfile.json'
 DATE_FORMAT = '%Y-%m-%dT%H:%M:%S'
+LAST_N = 3
+HALF_LIFE = 30
+HITS_TO_COMPLETE = 2
 
 ################################################################################
 # TEMPLATES
@@ -323,7 +323,7 @@ class Chunk:
 
 
 ################################################################################
-# CHUNKT
+# DOCUMENT
 ################################################################################
 
 class Document:
@@ -414,7 +414,6 @@ class Bandit:
 
         return True
 
-
 ################################################################################
 # BANDIT ENGINE
 ################################################################################
@@ -489,87 +488,103 @@ class BanditEngine:
 
         return int(round(residual / (HITS_TO_COMPLETE * total_chunks), 3) * 100)
 
-
-
-
 ################################################################################
 # BANDIT REPOSITORY
 ################################################################################
 
-def load_engine_data():
-    with codecs.open(CHUNKTS_FILE, 'r', encoding='utf-8') as bandits_file:
-        return json.loads(bandits_file.read())
+class BanditRepository:
 
-def save_engine_data(bandit_engine):
-    with codecs.open(CHUNKTS_FILE, 'w', encoding='utf-8') as bandits_file:
-        bandits_file.write(json.dumps(bandit_engine.data))
+    def __init__(self, chunktfile=CHUNKTFILE):
+        self.chunktfile = chunktfile
 
-def load_bandit(bandit_engine, document):
-    bandit_engine.update(document)
-    return bandit_engine.load(document)
+    def load_engine_data(self):
+        with codecs.open(self.chunktfile, 'r', encoding='utf-8') as chunktfile:
+            return json.loads(chunktfile.read()) 
+
+    def save_engine_data(self, engine_data):
+        with codecs.open(self.chunktfile, 'w', encoding='utf-8') as chunktfile:
+            chunktfile.write(json.dumps(engine_data))
 
 ################################################################################
-# CHUNKT REPOSITORY
+# DOCUMENT REPOSITORY
 ################################################################################
 
-def all_documents():
-    documents = []
-    for root, dirs, files in os.walk(ROOT_DIR):
-        for f in files:
-            if f.endswith(".md"):
-                document_path = os.path.join(root.split('.chunkt/')[1], f)
-                document_hash = hashlib.md5(document_path).hexdigest()
-                documents.append(Document(document_path, document_hash))
-    
-    return sorted(documents, key=lambda x: x.path)
+class DocumentRepository:
 
-def find_document(document_hash):
-    for document in all_documents():
-        if document.hash == document_hash:
-            return document
+    def __init__(self, root_dir=ROOT_DIR):
+        self.root_dir = root_dir
 
+    def all(self):
+        documents = []
+        for root, dirs, files in os.walk(ROOT_DIR):
+            for f in files:
+                if f.endswith(".md"):
+                    document_path = os.path.join(root.split('.chunkt/')[1], f)
+                    document_hash = hashlib.md5(document_path).hexdigest()
+                    documents.append(Document(document_path, document_hash))
+        
+        return sorted(documents, key=lambda x: x.path)
+
+    def find(self, document_hash):
+        for document in self.all():
+            if document.hash == document_hash:
+                return document
 
 ################################################################################
 # WEB SERVER
 ################################################################################
 
+def load_bandit_engine(bandit_repository, document=None):
+    engine_data = bandit_repository.load_engine_data()
+    bandit_engine = BanditEngine(engine_data)
+    if document:
+        bandit_engine.update(document)
+
+    return bandit_engine
+
+
 @app.route('/')
 def index():
-    bandit_engine = BanditEngine(load_engine_data())
-    documents = all_documents()
+    engine_data = BanditRepository(CHUNKTFILE).load_engine_data()
+    bandit_engine = BanditEngine(engine_data)
+    documents = DocumentRepository().all()
     return Template(INDEX_TEMPLATE).render(documents=documents, bandit_engine=bandit_engine)
 
 @app.route('/<document_hash>/pull')
 def pull(document_hash):
-    document = find_document(document_hash)
+    document = DocumentRepository().find(document_hash)
     if not document:
         return 'Document not found', 404
 
-    bandit_engine = BanditEngine(load_engine_data())
-    bandit = load_bandit(bandit_engine, document)
+    bandit_repository = BanditRepository(CHUNKTFILE)
+    bandit_engine = load_bandit_engine(bandit_repository, document)
+    bandit = bandit_engine.load(document)
     chunk = bandit.pull()
-    save_engine_data(bandit_engine)
+    bandit_repository.save_engine_data(bandit_engine.data)
+
     return Template(CHUNK_TEMPLATE).render(document=document, chunk=chunk, bandit_engine=bandit_engine)
 
 @app.route('/<document_hash>/reward', methods=['POST'])
 def reward(document_hash):
-    document = find_document(document_hash)
+    document = DocumentRepository().find(document_hash)
     if not document:
         return 'Document not found', 404
 
-    bandit_engine = BanditEngine(load_engine_data())
-    bandit = load_bandit(bandit_engine, document)
+    bandit_repository = BanditRepository(CHUNKTFILE)
+    bandit_engine = load_bandit_engine(bandit_repository, document)
+    bandit = bandit_engine.load(document)
     bandit.reward(int(request.form['value']), request.form['chunk_hash'])
-    save_engine_data(bandit_engine)
+    bandit_repository.save_engine_data(bandit_engine.data)
+
     return redirect(url_for('pull', document_hash=document_hash))
 
 @app.before_request
 def bootstrap():
     if not os.path.exists(ROOT_DIR):
         os.makedirs(ROOT_DIR)
-    if not os.path.exists(CHUNKTS_FILE):
-        with codecs.open(CHUNKTS_FILE, 'w', encoding='utf-8') as bandits_file:
-            bandits_file.write('{}\n')
+    if not os.path.exists(CHUNKTFILE):
+        with codecs.open(CHUNKTFILE, 'w', encoding='utf-8') as chunktfile:
+            chunktfile.write('{}\n')
 
 
 if __name__ == '__main__':
