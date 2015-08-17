@@ -14,6 +14,7 @@ import scipy.stats as st
 from jinja2 import Template
 from bs4 import BeautifulSoup
 from collections import deque
+from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for
 
 reload(sys)  
@@ -26,6 +27,9 @@ sys.setdefaultencoding('utf8')
 ROOT_DIR = os.getenv('HOME') + '/.chunkt'
 CHUNKTS_FILE = ROOT_DIR + '/chunktfile.json'
 LAST_N = 3
+HITS_TO_COMPLETE = 2
+HALF_LIFE = 30
+DATE_FORMAT = '%Y-%m-%dT%H:%M:%S'
 
 ################################################################################
 # TEMPLATES
@@ -43,6 +47,7 @@ INDEX_TEMPLATE = '''
             body { background: url(http://subtlepatterns.com/patterns/cubes.png); }
             .container-fluid { margin: 10px !important; }
             .list-group { margin-bottom: 10px; !important; }
+            .completed { float: right; }
         </style>
     <head>
     <body style="background: url(http://subtlepatterns.com/patterns/cubes.png);">
@@ -55,7 +60,12 @@ INDEX_TEMPLATE = '''
                     <div class="panel-body">
                         <div id="documents" class="list-group">
                         {% for document in documents %}
-                            <a href="/{{ document.hash }}/pull" class="list-group-item">{{ ' / '.join(document.path.split('/')) }}</a>
+                            <a href="/{{ document.hash }}/pull" class="list-group-item">
+                                {{ ' / '.join(document.path.split('/')) }}
+                                <span class="badge completed">
+                                    {{ bandit_engine.completed(document) }} %
+                                </span>
+                            </a>
                         {% endfor %}
                         </div>
                     </div>
@@ -91,6 +101,8 @@ CHUNK_TEMPLATE = '''
         <style>
             body { background: url(http://subtlepatterns.com/patterns/cubes.png); }
             .container-fluid { margin: 10px !important; }
+            .completed { float: right; }
+
             .hll { background-color: #ffffcc }
             .c { color: #408080; font-style: italic } /* Comment */
             .err { border: 1px solid #FF0000 } /* Error */
@@ -162,6 +174,9 @@ CHUNK_TEMPLATE = '''
                     <div class="panel-heading">
                         <h1 class="panel-title"><a href="/" tabindex="-1">
                             <strong>chunkt</strong></a> <em>/ {{ ' / '.join(document.path.split('/')) }}</em>
+                            <span class="completed badge">
+                                {{ bandit_engine.completed(document) }} %
+                            </span>
                         </h1>
                     </div>
                     <div class="panel-body">
@@ -261,7 +276,7 @@ class Chunk:
 
     def _handle_list_items(self, el, registry, func):
         p = el.find('p')
-        ul = el.select_one('ul')
+        ul = el.select_one('> ul')
         pre = el.select_one('> pre')
         wrapped_pre = el.select_one('.codehilite > pre')
 
@@ -285,11 +300,11 @@ class Chunk:
 
     def _extract_list_item_content(self, el):
         content = ''
-        for c in el.select('> *'):
+        for c in el.contents:
             if c.name == 'p':
                 content += c.renderContents()
             elif c.name != 'ul': 
-                content += c.extract().strip()
+                content += str(c).rstrip()
 
         return content
 
@@ -384,8 +399,12 @@ class Bandit:
 
         if value == 0:
             self.data['chunks'][chunk_hash]['hits'] += 1
+            last_hits = deque(self.data['chunks'][chunk_hash]['last_hits'], HITS_TO_COMPLETE)
+            last_hits.append(datetime.now().strftime(DATE_FORMAT))
+            self.data['chunks'][chunk_hash]['last_hits'] = list(last_hits)
         elif value == 1:
             self.data['chunks'][chunk_hash]['misses'] += 1
+            self.data['chunks'][chunk_hash]['last_hits'] = []
         else:
             return False
 
@@ -426,7 +445,7 @@ class BanditEngine:
         for h in obsolete_hashes:
             del self.data[document.hash]['chunks'][h]
         for h in new_hashes:
-            self.data[document.hash]['chunks'][h] = {'misses': 0, 'hits': 0}
+            self.data[document.hash]['chunks'][h] = {'misses': 0, 'hits': 0, 'last_hits': []}
 
     def _post_create_chunk(self, chunk, registry):
         if len(chunk.children) > 0:
@@ -452,6 +471,24 @@ class BanditEngine:
     def load(self, document):
         data = self.data[document.hash]
         return Bandit(document, data)
+
+    def completed(self, document):
+        data = self.data.get(document.hash)
+
+        if not data:
+            return 0
+
+        total_chunks = len(data['chunks'])
+        residual = 0.0
+        for chunk_hash, chunk in data['chunks'].iteritems():
+            for hit in chunk['last_hits'][::-1][:HITS_TO_COMPLETE]:
+                parsed = datetime.strptime(hit, DATE_FORMAT)
+                now = datetime.now()
+                diff = now - parsed
+                residual += 1 * (2 ** -(diff.days / HALF_LIFE))
+
+        return int(round(residual / (HITS_TO_COMPLETE * total_chunks), 3) * 100)
+
 
 
 
@@ -498,7 +535,9 @@ def find_document(document_hash):
 
 @app.route('/')
 def index():
-    return Template(INDEX_TEMPLATE).render(documents=all_documents())
+    bandit_engine = BanditEngine(load_engine_data())
+    documents = all_documents()
+    return Template(INDEX_TEMPLATE).render(documents=documents, bandit_engine=bandit_engine)
 
 @app.route('/<document_hash>/pull')
 def pull(document_hash):
@@ -510,7 +549,7 @@ def pull(document_hash):
     bandit = load_bandit(bandit_engine, document)
     chunk = bandit.pull()
     save_engine_data(bandit_engine)
-    return Template(CHUNK_TEMPLATE).render(document=document, chunk=chunk)
+    return Template(CHUNK_TEMPLATE).render(document=document, chunk=chunk, bandit_engine=bandit_engine)
 
 @app.route('/<document_hash>/reward', methods=['POST'])
 def reward(document_hash):
